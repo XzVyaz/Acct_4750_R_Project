@@ -1,0 +1,9 @@
+# Knitr and RStudio cache files
+*_cache/
+*_files/
+.Rhistory
+.RData
+.Rproj.user/
+
+# Ignore large raw data dumps if over 50-100MB
+# data/raw/*.csv
