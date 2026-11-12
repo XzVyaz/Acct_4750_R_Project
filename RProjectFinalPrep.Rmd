@@ -1,0 +1,168 @@
+---
+title: "RProjectFinalPrep"
+output: html_document
+date: "2026-11-11"
+---
+
+```{r}
+install.packages("irr")
+```
+
+
+
+```{r}
+# ==============================================================================
+# SCRIPT: 05_process_hand_coding.R
+# PURPOSE: Reconcile coder entries, evaluate inter-rater reliability,
+#          merge with catalog performance metrics, and export analysis_data.csv
+# ==============================================================================
+
+
+library(dplyr)
+library(readr)
+library(irr)
+library(purrr)
+library(tidyr)
+
+# ------------------------------------------------------------------------------
+# 1. Load Completed Hand-Coding File
+# ------------------------------------------------------------------------------
+input_path <- "data/processed/hand_coding_completed.csv"
+
+if (!file.exists(input_path)) {
+  stop("Cannot find '", input_path, "'. Please ensure the completed CSV is saved there.")
+}
+
+coded_raw <- read_csv(input_path, show_col_types = FALSE)
+message("Loaded ", nrow(coded_raw), " rows from ", input_path)
+
+# ------------------------------------------------------------------------------
+# 2. Evaluate Inter-Rater Reliability Across Overlap Sample
+# ------------------------------------------------------------------------------
+# Standardize column names to lowercase and strip unwanted spaces
+names(coded_raw) <- tolower(gsub(" ", "_", names(coded_raw)))
+
+overlap_games <- coded_raw |>
+  filter(!is.na(secondary_coder) & secondary_coder != "")
+
+message("\n=======================================================")
+message("INTER-RATER RELIABILITY ASSESSMENT (N = ", nrow(overlap_games), " overlap games)")
+message("=======================================================")
+
+flags <- c("monetization_none", "cosmetic_only", "gameplay_advantage", "paywalled_content")
+
+reliability_results <- purrr::map_dfr(flags, function(flag) {
+  # Find columns that match coder 1/coder 2 and the flag name regardless of underscore placement
+  c1_match <- grep(paste0("coder.*1.*", flag), names(overlap_games), value = TRUE)
+  c2_match <- grep(paste0("coder.*2.*", flag), names(overlap_games), value = TRUE)
+  
+  if (length(c1_match) == 0 || length(c2_match) == 0) {
+    stop("Could not find matching columns for category: '", flag, "'. Check names(coded_raw).")
+  }
+  
+  r1 <- as.integer(replace_na(overlap_games[[c1_match[1]]], 0L))
+  r2 <- as.integer(replace_na(overlap_games[[c2_match[1]]], 0L))
+  
+  stats <- calc_binary_agreement(r1, r2)
+  
+  tibble(
+    category = flag,
+    raw_agreement_pct = paste0(stats$percent_agreement, "%"),
+    adjusted_score = stats$agreement_score,
+    interpretation = case_when(
+      stats$agreement_score >= 0.81 ~ "Near-perfect agreement",
+      stats$agreement_score >= 0.61 ~ "Substantial agreement",
+      stats$agreement_score >= 0.41 ~ "Moderate agreement",
+      stats$agreement_score >= 0.21 ~ "Fair agreement",
+      TRUE                          ~ "Slight / Poor agreement"
+    )
+  )
+})
+
+print(as.data.frame(reliability_results))
+message("=======================================================\n")
+
+# ------------------------------------------------------------------------------
+# 3. Automated Discrepancy Reconciliation
+# ------------------------------------------------------------------------------
+# Rule: If coder 1 provided an entry, use it. If missing, fall back to coder 2.
+clean_coding <- coded_raw |>
+  mutate(
+    monetization_none  = as.integer(coalesce(coder1_monetization_none, coder2_monetization_none, 0L)),
+    cosmetic_only      = as.integer(coalesce(coder1_cosmetic_only, coder2_cosmetic_only, 0L)),
+    gameplay_advantage = as.integer(coalesce(coder1_gameplay_advantage, coder2_gameplay_advantage, 0L)),
+    paywalled_content  = as.integer(coalesce(coder1_paywalled_content, coder2_paywalled_content, 0L))
+  ) |>
+  select(
+    appid,
+    name,
+    is_free,
+    base_price_usd,
+    primary_genre,
+    cat_35_iap = cat_35_iap_screening,
+    dlc_count_total,
+    monetization_none,
+    cosmetic_only,
+    gameplay_advantage,
+    paywalled_content
+  )
+
+# ------------------------------------------------------------------------------
+# 4. Merge with Catalog Performance Metrics (Review Counts & Percentages)
+# ------------------------------------------------------------------------------
+# Check if catalog_clean exists in environment; if not, read from parquet/csv
+if (!exists("catalog_clean")) {
+  catalog_path <- "data/processed/steam_broad_catalog.parquet"
+  if (file.exists(catalog_path)) {
+    catalog_clean <- arrow::read_parquet(catalog_path)
+  } else {
+    stop("Cannot find catalog_clean in environment or '", catalog_path, "'.")
+  }
+}
+
+analysis_data <- clean_coding |>
+  inner_join(
+    catalog_clean |> select(appid, positive, negative, total_reviews, positive_pct),
+    by = "appid"
+  ) |>
+  mutate(
+    # Key econometric continuous transformations
+    log_reviews = log(total_reviews),
+    # Consolidated indicator for stacking multiple monetization practices
+    monetization_count = cosmetic_only + gameplay_advantage + paywalled_content
+  ) |>
+  distinct(appid, .keep_all = TRUE)
+
+# ------------------------------------------------------------------------------
+# 5. Export Final Clean Modeling Dataset
+# ------------------------------------------------------------------------------
+output_path <- "data/processed/analysis_data.csv"
+write_csv(analysis_data, output_path)
+
+message("SUCCESS! Step 2 complete.")
+message("Exported: ", output_path)
+message("Total rows ready for regression: ", nrow(analysis_data))
+message("\nMonetization Type Frequency Summary:")
+print(colSums(analysis_data[, c("monetization_none", "cosmetic_only", "gameplay_advantage", "paywalled_content")]))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

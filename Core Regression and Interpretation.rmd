@@ -1,0 +1,28 @@
+# Member 4
+
+{```{r}
+# Test the primary Hypothesis: Whether monetization penalties
+# differ for Free-To-Play versus Premium games
+# and interpret real-world economic impact
+
+analysis_data <- read.csv("data/processed/analysis_data.csv") 
+ 
+# Model 3: Full model with interaction terms between monetization type and F2P
+m3_interaction <- lm( 
+
+    positive_pct ~ cosmetic_only + gameplay_advantage + 
+    paywalled_content + is_free + 
+    (cosmetic_only * is_free) + (gameplay_advantage * is_free) + 
+    (paywalled_content * is_free) + 
+    base_price_usd + log_reviews + factor(primary_genre), 
+
+  data = analysis_data 
+) 
+ 
+message("=== MODEL 3: FULL INTERACTION MODEL ===") 
+print(summary(m3_interaction)) 
+
+```}
+
+
+

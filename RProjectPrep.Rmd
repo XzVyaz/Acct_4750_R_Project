@@ -1,0 +1,261 @@
+---
+title: "RProjectPrep"
+output: html_document
+date: "2026-10-28"
+---
+```{r}
+setwd("C:/Users/xkar1/OneDrive/Desktop/acct4750_data/R Project")
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+write_parquet(catalog_clean, "data/processed/steam_broad_catalog.parquet")
+```
+
+```{r}
+library(httr2)
+library(jsonlite)
+library(dplyr)
+library(purrr)
+library(arrow)
+
+# ------------------------------------------------------------------------------
+# 1. Ensure Catalog Pools Exist (Premium + F2P)
+# ------------------------------------------------------------------------------
+# If f2p_clean is not in your environment, pull it once:
+if (!exists("f2p_clean")) {
+  message("Pulling dedicated F2P pool from SteamSpy...")
+  req_f2p <- request("https://steamspy.com/api.php?request=tag&tag=Free+to+Play") |>
+    req_timeout(30) |>
+    req_user_agent("UniversityDiscoveryProject/2.0 (academic research)")
+  resp_f2p <- req_perform(req_f2p)
+  data_f2p <- resp_body_json(resp_f2p)
+  
+  f2p_clean <- map_dfr(names(data_f2p), function(id) {
+    item <- data_f2p[[id]]
+    tibble(
+      appid = as.integer(id),
+      name = as.character(item$name %||% NA_character_),
+      positive = as.integer(item$positive %||% 0),
+      negative = as.integer(item$negative %||% 0),
+      price_cents = 0L,
+      owners_range = as.character(item$owners %||% "0 .. 0")
+    )
+  }) |>
+    mutate(total_reviews = positive + negative) |>
+    filter(total_reviews >= 100) |>
+    mutate(
+      positive_pct = (positive / total_reviews) * 100,
+      base_price_usd = 0.0,
+      is_free = 1L
+    )
+}
+
+# Combine with your premium games pool
+premium_pool <- catalog_clean |>
+  filter(price_cents > 0) |>
+  mutate(is_free = 0L)
+
+f2p_pool <- f2p_clean |>
+  filter(!appid %in% premium_pool$appid)
+
+message("Available candidate pool: ", nrow(premium_pool), " Premium and ", nrow(f2p_pool), " F2P games.")
+
+# ------------------------------------------------------------------------------
+# 2. Draw Sample Matching the Market Ratio (85% Premium / 15% F2P)
+# ------------------------------------------------------------------------------
+set.seed(42)
+
+# Exactly 204 Premium (85%) and 36 Free-to-Play (15%) = 240 total games
+target_premium <- 204
+target_f2p <- 36
+
+sampled_premium <- slice_sample(premium_pool, n = min(target_premium, nrow(premium_pool)))
+sampled_f2p     <- slice_sample(f2p_pool, n = min(target_f2p, nrow(f2p_pool)))
+
+sampled_games <- bind_rows(sampled_premium, sampled_f2p) |>
+  slice_sample(prop = 1) # Shuffle order
+
+message("Sample drawn: ", nrow(sampled_games), " total games (", 
+        sum(sampled_games$is_free == 0), " Premium, ", 
+        sum(sampled_games$is_free == 1), " F2P).")
+
+# ------------------------------------------------------------------------------
+# 3. Enrich Full Store Details for the 240 Sampled Games
+# ------------------------------------------------------------------------------
+fetch_full_storefront <- function(appid) {
+  url <- paste0("https://store.steampowered.com/api/appdetails?appids=", appid, "&cc=us&l=en")
+  tryCatch({
+    req <- request(url) |>
+      req_timeout(12) |>
+      req_user_agent("UniversityDiscoveryProject/2.0 (academic research)")
+    
+    resp <- req_perform(req)
+    raw <- resp_body_json(resp)
+    app_data <- raw[[as.character(appid)]]
+    
+    if (!isTRUE(app_data$success)) {
+      return(list(success = FALSE, appid = appid))
+    }
+    
+    d <- app_data$data
+    short_desc <- d$short_description %||% ""
+    about_game <- d$about_the_game %||% ""
+    clean_text <- gsub("<.*?>", " ", paste(short_desc, about_game))
+    clean_text <- gsub("\\s+", " ", clean_text)
+    
+    categories <- map_int(d$categories %||% list(), ~ .x$id %||% 0L)
+    cat_35_flag <- if (35L %in% categories) 1L else 0L
+    
+    genres <- map_chr(d$genres %||% list(), ~ .x$description %||% "")
+    raw_dlc_ids <- unlist(d$dlc %||% list())
+    
+    list(
+      success = TRUE,
+      appid = appid,
+      store_name = d$name %||% NA_character_,
+      cat_35_iap = cat_35_flag,
+      primary_genre = if (length(genres) > 0) genres[1] else "Unknown",
+      dlc_count_total = length(raw_dlc_ids),
+      dlc_ids = head(raw_dlc_ids, 20),
+      store_text = clean_text
+    )
+  }, error = function(e) {
+    list(success = FALSE, appid = appid)
+  })
+}
+
+fetch_dlc_metadata <- function(dlc_id) {
+  url <- paste0("https://store.steampowered.com/api/appdetails?appids=", dlc_id, "&filters=basic,price_overview&cc=us&l=en")
+  tryCatch({
+    req <- request(url) |> req_timeout(6)
+    resp <- req_perform(req)
+    raw <- resp_body_json(resp)
+    d <- raw[[as.character(dlc_id)]]$data
+    name <- d$name %||% paste("DLC", dlc_id)
+    price <- if (!is.null(d$price_overview$final_formatted)) d$price_overview$final_formatted else "Free/Included"
+    paste0(name, " (", price, ")")
+  }, error = function(e) {
+    paste0("DLC ", dlc_id)
+  })
+}
+
+message("Enriching the 240 sampled titles with store text and DLC names...")
+enriched_records <- list()
+
+for (i in seq_len(nrow(sampled_games))) {
+  target_id <- sampled_games$appid[i]
+  if (i %% 25 == 0) message("  Enriched ", i, " / ", nrow(sampled_games), " games...")
+  
+  meta <- fetch_full_storefront(target_id)
+  Sys.sleep(0.3)
+  
+  if (isTRUE(meta$success)) {
+    dlc_summary_str <- "None"
+    if (length(meta$dlc_ids) > 0) {
+      dlc_names <- map_chr(meta$dlc_ids, function(did) {
+        Sys.sleep(0.15)
+        fetch_dlc_metadata(did)
+      })
+      dlc_summary_str <- paste(dlc_names, collapse = " | ")
+    }
+    meta$dlc_inventory_str <- dlc_summary_str
+    meta$dlc_ids <- NULL
+    enriched_records[[length(enriched_records) + 1]] <- as_tibble(meta)
+  } else {
+    # If a call fails or game is region-locked, provide fallback row
+    enriched_records[[length(enriched_records) + 1]] <- tibble(
+      success = TRUE, # keep row so sample size stays 240
+      appid = target_id,
+      store_name = sampled_games$name[i],
+      cat_35_iap = 0L,
+      primary_genre = "Unknown",
+      dlc_count_total = 0L,
+      store_text = "Store page unavailable via API",
+      dlc_inventory_str = "None"
+    )
+  }
+}
+
+enriched_df <- bind_rows(enriched_records)
+
+# ------------------------------------------------------------------------------
+# 4. Generate the 4-Person Coding Sheet with 20% Overlap
+# ------------------------------------------------------------------------------
+coding_base <- sampled_games |>
+  inner_join(enriched_df, by = "appid")
+
+set.seed(101)
+n_total <- nrow(coding_base)
+n_overlap <- round(0.20 * n_total) # 48 double-coded games
+
+shuffled_ids <- sample(coding_base$appid)
+overlap_ids  <- head(shuffled_ids, n_overlap)
+single_ids   <- tail(shuffled_ids, n_total - n_overlap)
+
+coders <- c("Coder_A", "Coder_B", "Coder_C", "Coder_D")
+
+single_coded_df <- tibble(
+  appid = single_ids,
+  primary_coder = rep(coders, length.out = length(single_ids)),
+  secondary_coder = NA_character_
+)
+
+pair_combos <- list(
+  c("Coder_A", "Coder_B"),
+  c("Coder_B", "Coder_C"),
+  c("Coder_C", "Coder_D"),
+  c("Coder_D", "Coder_A")
+)
+
+overlap_coded_df <- tibble(
+  appid = overlap_ids,
+  primary_coder = map_chr(seq_along(overlap_ids), ~ pair_combos[[((.x - 1) %% 4) + 1]][1]),
+  secondary_coder = map_chr(seq_along(overlap_ids), ~ pair_combos[[((.x - 1) %% 4) + 1]][2])
+)
+
+assignments <- bind_rows(single_coded_df, overlap_coded_df)
+
+coding_sheet <- coding_base |>
+  inner_join(assignments, by = "appid") |>
+  select(
+    appid,
+    name,
+    primary_coder,
+    secondary_coder,
+    is_free,
+    base_price_usd,
+    primary_genre,
+    cat_35_iap_screening = cat_35_iap,
+    dlc_count_total,
+    dlc_inventory_str,
+    store_text
+  ) |>
+  mutate(
+    coder1_monetization_none = NA_integer_,
+    coder1_cosmetic_only = NA_integer_,
+    coder1_gameplay_advantage = NA_integer_,
+    coder1_paywalled_content = NA_integer_,
+    coder1_notes = NA_character_,
+    coder2_monetization_none = NA_integer_,
+    coder2_cosmetic_only = NA_integer_,
+    coder2_gameplay_advantage = NA_integer_,
+    coder2_paywalled_content = NA_integer_,
+    coder2_notes = NA_character_
+  )
+
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+write.csv(coding_sheet, "data/processed/hand_coding_master.csv", row.names = FALSE)
+message("Success! Saved hand_coding_master.csv with exactly ", nrow(coding_sheet), " rows.")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
