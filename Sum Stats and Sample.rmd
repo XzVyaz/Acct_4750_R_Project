@@ -1,1 +1,43 @@
 # Member 1:
+
+---
+title: "M1Regression - Group E"
+author: "Lindsey Huynh"
+date: "2026-11-14"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+analysis_data <- read.csv("data/processed/analysis_data.csv")
+```
+
+```{r}
+# Compute summary metrics for key continuous and indicator variables
+vars_to_summarize <- c("positive_pct", "base_price_usd", "total_reviews", "log_reviews",
+"is_free", "monetization_none", "cosmetic_only", "gameplay_advantage", "paywalled_content")
+```
+
+```{r}
+summary_table <- analysis_data |>
+ select(all_of(vars_to_summarize)) |>
+ pivot_longer(cols = everything(), names_to = "Variable", values_to =
+"Value") |>
+ group_by(Variable) |>
+ summarise(
+ Mean = round(mean(Value, na.rm = TRUE), 2),
+ SD = round(sd(Value, na.rm = TRUE), 2),
+ Median = round(median(Value, na.rm = TRUE), 2),
+ Min = round(min(Value, na.rm = TRUE), 2),
+ Max = round(max(Value, na.rm = TRUE), 2),
+ .groups = "drop"
+ )
+print(as.data.frame(summary_table))
+```
+
+
+

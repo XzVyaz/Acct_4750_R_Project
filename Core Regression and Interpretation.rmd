@@ -1,6 +1,6 @@
 # Member 4
 
-{```{r}
+```{r}
 # Test the primary Hypothesis: Whether monetization penalties
 # differ for Free-To-Play versus Premium games
 # and interpret real-world economic impact
@@ -22,7 +22,7 @@ m3_interaction <- lm(
 message("=== MODEL 3: FULL INTERACTION MODEL ===") 
 print(summary(m3_interaction)) 
 
-```}
+```
 
 
 

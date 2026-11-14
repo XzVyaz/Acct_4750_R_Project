@@ -1,1 +1,44 @@
 # Member 3
+
+---
+title: "R Project"
+output: html_document
+date: "2026-11-14"
+---
+
+# Member 3 Baseline Regressions (Univariate & Controlled OLS)
+
+```{r}
+
+analysis_data <- read.csv("data/processed/analysis_data.csv")
+
+# Model 1: Univariate regression
+# Looks at % of positive reviews and whether a game offers purchasable gameplay advantages to determine if those games generally receive lower review ratings.
+m1_univariate <- lm(
+  positive_pct ~ gameplay_advantage,
+  data = analysis_data
+)
+
+# Examines the same relationship with added controls by holding other variables constant.
+# Model 2: Multivariate regression with controls
+m2_controls <- lm(
+  positive_pct ~
+    cosmetic_only +
+    gameplay_advantage +
+    paywalled_content +
+    is_free +
+    base_price_usd +
+    log_reviews +
+    factor(primary_genre),
+  data = analysis_data
+)
+
+message("=== MODEL 1: UNIVARIATE ===")
+print(summary(m1_univariate))
+
+message("\n=== MODEL 2: MULTIVARIATE WITH CONTROLS ===")
+print(summary(m2_controls))
+
+```
+
+
